@@ -1,0 +1,544 @@
+// AgentLedger — Prisma Schema
+// Sprint 1: Authorization Registry + Audit Package Export
+// Sprint 2 (next): Audit Log Ingest + Policy Engine
+// Sprint 3 (next): Tax & Accounting Module
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth (NextAuth v5) ────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts   Account[]
+  sessions   Session[]
+  orgMembers OrgMember[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Organizations ──────────────────────────────────────────────────────────
+
+model Organization {
+  id               String   @id @default(cuid())
+  name             String
+  slug             String   @unique
+  planTier         PlanTier @default(STARTER)
+  stripeCustomerId String?
+  apiKey           String   @unique @default(cuid()) // SDK auth
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  members       OrgMember[]
+  agentWallets  AgentWallet[]
+  auditReports  AuditReport[]
+  apiKeys       ApiKey[]
+}
+
+model OrgMember {
+  id        String   @id @default(cuid())
+  orgId     String
+  userId    String
+  role      OrgRole  @default(MEMBER)
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+}
+
+model ApiKey {
+  id        String    @id @default(cuid())
+  orgId     String
+  name      String
+  keyHash   String    @unique // stored hashed, shown once
+  lastUsed  DateTime?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+// ─── Agent Wallets ──────────────────────────────────────────────────────────
+
+model AgentWallet {
+  id               String        @id @default(cuid())
+  orgId            String
+  walletAddress    String        // Solana pubkey
+  walletChain      Chain         @default(SOLANA)
+  agentName        String
+  agentDescription String?
+  framework        AgentFramework @default(CUSTOM)
+  registryAgentId  String?       // ERC-8004 Solana Agent Registry ref
+  status           WalletStatus  @default(ACTIVE)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  org                  Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  authorizationRecords AuthorizationRecord[]
+  auditSessions        AuditSession[]
+  policyFindings       PolicyFinding[]
+  taxEvents            TaxEvent[]
+
+  @@unique([orgId, walletAddress])
+}
+
+// ─── Authorization Records ──────────────────────────────────────────────────
+
+model AuthorizationRecord {
+  id                  String    @id @default(cuid())
+  agentWalletId       String
+  version             Int       // auto-incremented per agent
+  
+  // Scope definition
+  maxTxValueUsd       Decimal?  // null = unlimited
+  maxDailySpendUsd    Decimal?  // null = unlimited
+  whitelistedPrograms String[]  // Solana program IDs
+  permittedTxTypes    String[]  // swap, stake, transfer, etc.
+  operationalPurpose  String    @db.Text
+  
+  // Authorization provenance
+  orgSignerPubkey     String    // operator's signing key
+  signature           String    @db.Text // ed25519 over record hash
+  recordHash          String    // sha256 of canonical JSON
+  
+  // On-chain anchoring
+  onChainAnchorTx     String?   // Solana tx signature (memo program)
+  anchoredAt          DateTime?
+  
+  // Lifecycle
+  effectiveFrom       DateTime  @default(now())
+  effectiveTo         DateTime? // null = currently active
+  revokedAt           DateTime?
+  revokedReason       String?
+  
+  createdAt           DateTime  @default(now())
+
+  agentWallet    AgentWallet     @relation(fields: [agentWalletId], references: [id], onDelete: Cascade)
+  policyFindings PolicyFinding[]
+
+  @@unique([agentWalletId, version])
+}
+
+// ─── Audit Sessions & Log Entries ──────────────────────────────────────────
+
+model AuditSession {
+  id            String    @id @default(cuid())
+  agentWalletId String
+  sessionStart  DateTime
+  sessionEnd    DateTime?
+  merkleRoot    String?   // sha256 of all event hashes in order
+  onChainAnchorTx String? // Solana memo tx
+  anchoredAt    DateTime?
+  logCount      Int       @default(0)
+  status        SessionStatus @default(OPEN)
+  createdAt     DateTime  @default(now())
+
+  agentWallet AgentWallet      @relation(fields: [agentWalletId], references: [id], onDelete: Cascade)
+  logEntries  AuditLogEntry[]
+}
+
+// Append-only — never UPDATE or DELETE
+model AuditLogEntry {
+  id              String         @id @default(cuid())
+  sessionId       String
+  agentWalletId   String
+  sequenceNum     Int
+  eventType       AuditEventType
+  
+  // Reasoning capture
+  reasoningSummary    String?    @db.Text // agent's stated intent
+  promptContextHash   String?    // sha256 of prompt window (not stored raw)
+  
+  // Action capture
+  toolName            String?
+  toolParamsHash      String?
+  txSignature         String?    // Solana tx sig if on-chain
+  onChainProgram      String?    // Solana program ID
+  amountUsd           Decimal?
+  
+  // Deviation flag (set by policy engine)
+  flaggedDeviation    Boolean    @default(false)
+  deviationNotes      String?
+  
+  createdAt           DateTime   @default(now())
+
+  session AuditSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, sequenceNum])
+}
+
+// ─── Policy Findings ────────────────────────────────────────────────────────
+
+model PolicyFinding {
+  id                  String         @id @default(cuid())
+  agentWalletId       String
+  authorizationId     String?        // which auth was in effect
+  
+  findingType         FindingType
+  severity            FindingSeverity
+  title               String
+  description         String         @db.Text
+  txSignature         String?
+  
+  status              FindingStatus  @default(OPEN)
+  dispositionNotes    String?        @db.Text
+  disposedBy          String?        // user id
+  disposedAt          DateTime?
+  
+  detectedAt          DateTime       @default(now())
+  createdAt           DateTime       @default(now())
+
+  agentWallet   AgentWallet          @relation(fields: [agentWalletId], references: [id], onDelete: Cascade)
+  authorization AuthorizationRecord? @relation(fields: [authorizationId], references: [id])
+}
+
+// ─── Tax Events ─────────────────────────────────────────────────────────────
+
+model TaxEvent {
+  id             String        @id @default(cuid())
+  agentWalletId  String
+  taxYear        Int
+  
+  txSignature    String?
+  blockTime      DateTime?
+  eventType      TaxEventType
+  
+  tokenSymbol    String?
+  tokenAmount    Decimal?
+  usdValueAtTime Decimal?      // price at time of tx
+  costBasisUsd   Decimal?      // for disposals
+  realizedGlUsd  Decimal?      // gain/loss if disposal
+  
+  walletChain    Chain         @default(SOLANA)
+  notes          String?
+  
+  createdAt      DateTime      @default(now())
+
+  agentWallet AgentWallet @relation(fields: [agentWalletId], references: [id], onDelete: Cascade)
+
+  @@unique([agentWalletId, txSignature])
+}
+
+// ─── Audit Reports ──────────────────────────────────────────────────────────
+
+model AuditReport {
+  id           String       @id @default(cuid())
+  orgId        String
+  reportType   ReportType
+  reportFormat ReportFormat @default(STANDARD)
+  
+  periodStart  DateTime
+  periodEnd    DateTime
+  
+  // Storage
+  r2Key        String?      // Cloudflare R2 path
+  r2Url        String?      // presigned download URL (refreshed on demand)
+  fileSizeBytes Int?
+  
+  // Generation metadata
+  status       ReportStatus @default(PENDING)
+  errorMessage String?
+  generatedAt  DateTime?
+  requestedBy  String?      // user id
+  
+  // Content summary (for display without opening PDF)
+  agentCount       Int?
+  findingCount     Int?
+  txCount          Int?
+  totalValueUsd    Decimal?
+  
+  createdAt    DateTime     @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum PlanTier {
+  STARTER      // $49/mo, 5 wallets
+  PROFESSIONAL // $199/mo, 25 wallets
+  ENTERPRISE   // $999/mo, unlimited
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+  AUDITOR    // read-only, can download reports
+}
+
+enum Chain {
+  SOLANA
+  BASE
+}
+
+enum AgentFramework {
+  ELIZAOS
+  SOLANA_AGENT_KIT
+  GOAT
+  CUSTOM
+}
+
+enum WalletStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum SessionStatus {
+  OPEN
+  CLOSED
+  ANCHORED
+}
+
+enum AuditEventType {
+  REASONING
+  TOOL_CALL
+  TX_SUBMIT
+  TX_CONFIRM
+  TX_FAILED
+  ERROR
+  SESSION_START
+  SESSION_END
+}
+
+enum FindingType {
+  EXCEEDED_TX_LIMIT
+  EXCEEDED_DAILY_LIMIT
+  UNAUTHORIZED_PROGRAM
+  ANOMALOUS_FREQUENCY
+  NO_ACTIVE_AUTHORIZATION
+  REASONING_MISMATCH
+}
+
+enum FindingSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum FindingStatus {
+  OPEN
+  ACKNOWLEDGED
+  REMEDIATED
+  ACCEPTED_RISK
+}
+
+enum TaxEventType {
+  STAKING_INCOME
+  API_FEE_INCOME
+  SWAP_REALIZED_GAIN
+  SWAP_REALIZED_LOSS
+  TRANSFER_IN
+  TRANSFER_OUT
+  TX_FEE
+  AIRDROP_INCOME
+}
+
+enum ReportType {
+  FULL_AUDIT_PACKAGE
+  COMPLIANCE_ONLY
+  TAX_POSITION
+  FINDINGS_SUMMARY
+}
+
+enum ReportFormat {
+  STANDARD       // general enterprise
+  FEDERAL        // NIST/CMMC language
+  CPA            // tax practitioner format
+}
+
+enum ReportStatus {
+  PENDING
+  GENERATING
+  COMPLETE
+  FAILED
+}
+// ─── Marketing automation tables ─────────────────────────────────────────────
+// Add these to prisma/schema.prisma
+
+model OutreachContact {
+  id             String          @id @default(cuid())
+  email          String          @unique
+  firstName      String?
+  lastName       String?
+  company        String?
+  title          String?
+  
+  // Source metadata
+  source         ContactSource
+  cageCode       String?         // Federal contractor CAGE code
+  uei            String?         // SAM.gov UEI
+  naicsCode      String?         // NAICS code
+  solanaWallet   String?         // For Solana ecosystem contacts
+  
+  // Outreach state
+  status         ContactStatus   @default(COLD)
+  lastContactedAt DateTime?
+  
+  // Personalization
+  notes          String?         @db.Text
+  
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  
+  sequences  ContactSequence[]
+  events     OutreachEvent[]
+}
+
+model OutreachSequence {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  targetAudience String  // e.g. "federal_contractor", "solana_builder", "ai_ops"
+  steps       Json      // array of { delayDays, subjectTemplate, bodyTemplate }
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  
+  contacts ContactSequence[]
+}
+
+model ContactSequence {
+  id           String           @id @default(cuid())
+  contactId    String
+  sequenceId   String
+  currentStep  Int              @default(0)
+  startedAt    DateTime         @default(now())
+  nextSendAt   DateTime?
+  completedAt  DateTime?
+  paused       Boolean          @default(false)
+  
+  contact  OutreachContact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  sequence OutreachSequence @relation(fields: [sequenceId], references: [id])
+  
+  @@unique([contactId, sequenceId])
+}
+
+model OutreachEvent {
+  id          String      @id @default(cuid())
+  contactId   String
+  eventType   EmailEvent
+  subject     String?
+  body        String?     @db.Text
+  messageId   String?     // Resend message ID
+  openedAt    DateTime?
+  clickedAt   DateTime?
+  repliedAt   DateTime?
+  bouncedAt   DateTime?
+  createdAt   DateTime    @default(now())
+  
+  contact OutreachContact @relation(fields: [contactId], references: [id])
+}
+
+model ContentItem {
+  id           String        @id @default(cuid())
+  type         ContentType
+  title        String
+  body         String        @db.Text
+  status       ContentStatus @default(DRAFT)
+  platform     String?       // blog, twitter, linkedin, newsletter
+  publishedAt  DateTime?
+  publishedUrl String?
+  createdAt    DateTime      @default(now())
+}
+
+model MarketingMetric {
+  id        String   @id @default(cuid())
+  metric    String   // signups, activations, mrr, outreach_sent, open_rate
+  value     Float
+  date      DateTime @default(now())
+  metadata  Json?
+}
+
+enum ContactSource {
+  SAM_GOV
+  SOLANA_REGISTRY
+  LINKEDIN
+  MANUAL
+  INBOUND
+  REFERRAL
+}
+
+enum ContactStatus {
+  COLD
+  CONTACTED
+  REPLIED
+  DEMO_SCHEDULED
+  CUSTOMER
+  NOT_INTERESTED
+  UNSUBSCRIBED
+}
+
+enum EmailEvent {
+  SENT
+  OPENED
+  CLICKED
+  REPLIED
+  BOUNCED
+  UNSUBSCRIBED
+}
+
+enum ContentType {
+  BLOG_POST
+  TWITTER_THREAD
+  LINKEDIN_POST
+  EMAIL_NEWSLETTER
+  GRANT_APPLICATION
+}
+
+enum ContentStatus {
+  DRAFT
+  REVIEW
+  APPROVED
+  PUBLISHED
+}

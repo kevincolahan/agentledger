@@ -1,0 +1,12 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "cd services/ingest && npm install && npm run build"
+
+[deploy]
+startCommand = "node services/ingest/dist/server.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[healthcheck]
+path = "/health"
+timeout = 5000

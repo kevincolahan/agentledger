@@ -1,0 +1,33 @@
+{
+  "buildCommand": "npm run db:generate && next build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "regions": [
+    "iad1"
+  ],
+  "env": {
+    "DATABASE_URL": "@database_url",
+    "AUTH_SECRET": "@auth_secret",
+    "RESEND_API_KEY": "@resend_api_key",
+    "RESEND_FROM": "@resend_from",
+    "ANTHROPIC_API_KEY": "@anthropic_api_key",
+    "SOLANA_RPC_URL": "@solana_rpc_url",
+    "SOLANA_ANCHOR_PRIVATE_KEY": "@solana_anchor_private_key",
+    "HELIUS_API_KEY": "@helius_api_key",
+    "HELIUS_RPC_URL": "@helius_rpc_url",
+    "R2_ACCOUNT_ID": "@r2_account_id",
+    "R2_ACCESS_KEY_ID": "@r2_access_key_id",
+    "R2_SECRET_ACCESS_KEY": "@r2_secret_access_key",
+    "R2_BUCKET_NAME": "@r2_bucket_name",
+    "STRIPE_SECRET_KEY": "@stripe_secret_key",
+    "STRIPE_WEBHOOK_SECRET": "@stripe_webhook_secret",
+    "CRON_SECRET": "@cron_secret"
+  },
+  "experimentalServices": {
+    "web": {
+      "routePrefix": "/",
+      "framework": "nextjs",
+      "buildCommand": "cd services/ingest && npm install && npm run build"
+    }
+  }
+}

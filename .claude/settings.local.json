@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(vercel:*)",
+      "Bash(npx vercel-build-output:*)",
+      "Bash(npx prisma:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(ls \"C:/Users/kevin/agentledger/app/\\(dashboard\\)/\")"
+    ]
+  }
+}

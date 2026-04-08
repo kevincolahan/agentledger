@@ -1,0 +1,11 @@
+{
+  "buildCommand": "prisma generate && next build",
+  "crons": [
+    { "path": "/api/cron/policy-scan", "schedule": "0 2 * * *" },
+    { "path": "/api/cron/anchor-retry", "schedule": "0 3 * * *" },
+    { "path": "/api/cron/marketing?task=outreach", "schedule": "0 4 * * *" },
+    { "path": "/api/cron/marketing?task=monitor", "schedule": "0 5 * * *" },
+    { "path": "/api/cron/marketing?task=content", "schedule": "0 9 * * 1" },
+    { "path": "/api/cron/marketing?task=newsletter", "schedule": "0 10 1 * *" }
+  ]
+}
